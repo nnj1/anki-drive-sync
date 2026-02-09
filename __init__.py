@@ -1,33 +1,36 @@
+from datetime import datetime
 from aqt import mw, gui_hooks
-from aqt.utils import showInfo
+from aqt.utils import showInfo, showCritical
 from aqt.qt import QAction, qconnect
-# Import the function from our new file
 from .settings_dialog import show_settings
-
-# --- 1. CORE ACTIONS ---
+from .sync import upload_collection
 
 def run_sync():
-    """Logic for the actual syncing process."""
-    showInfo("Anki-Drive-Sync: Syncing with Google Drive now...")
+    def on_progress(p):
+        mw.taskman.run_on_main(lambda: mw.progress.update(label=f"Syncing to Drive: {p}%", value=p, max=100))
+    
+    def do_sync(): return upload_collection(on_progress)
 
-# --- 2. TOOLBAR INTEGRATION ---
+    def on_finished(future):
+        mw.progress.finish()
+        try:
+            future.result()
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            config = mw.addonManager.getConfig(__name__) or {}
+            config["last_synced"] = now
+            mw.addonManager.writeConfig(__name__, config)
+            showInfo(f"Sync Successful!\nTime: {now}")
+        except Exception as e: showCritical(f"Sync Failed: {e}")
+
+    mw.progress.start(label="Preparing upload...", max=100, immediate=True)
+    mw.taskman.run_in_background(do_sync, on_finished)
 
 def add_sync_toolbar_button(links, toolbar):
-    sync_link = mw.toolbar.create_link(
-        "anki-drive-sync-action",
-        "Drive Sync",
-        run_sync,
-        tip="Quick Sync with Google Drive",
-        id="sync-btn"
-    )
-    links.append(sync_link)
+    links.append(mw.toolbar.create_link("sync-action", "Drive Sync", run_sync, tip="Sync to Google Drive", id="sync-btn"))
 
 gui_hooks.top_toolbar_did_init_links.append(add_sync_toolbar_button)
 
-# --- 3. TOOLS MENU INTEGRATION ---
-
 def setup_menu():
-    # Link the menu option to show_settings instead of open_settings
     action = QAction("Anki-Drive-Sync: Configure...", mw)
     qconnect(action.triggered, show_settings)
     mw.form.menuTools.addAction(action)
