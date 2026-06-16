@@ -65,20 +65,65 @@ class SettingsDialog(QDialog):
             self.refresh_ui()
 
     def handle_restore(self):
-        if not askUser("This will overwrite your local cards. Anki will restart. Proceed?"): return
-        def on_progress(p): mw.taskman.run_on_main(lambda: mw.progress.update(label=f"Downloading: {p}%", value=p))
-        def do_dl():
-            mw.col.close()
-            return download_collection(on_progress)
-        def on_done(fut):
-            mw.progress.finish()
-            try:
-                fut.result()
-                showInfo("Restore complete. Restarting Anki...")
-                mw.close()
-            except Exception as e: showCritical(f"Failed: {e}")
-        mw.progress.start(label="Downloading...", immediate=True)
-        mw.taskman.run_in_background(do_dl, on_done)
+        if not askUser("This will overwrite your local cards with the cloud version. Proceed?"):
+            return
+
+        # CRITICAL FIX: Capture the file path while mw.col STILL EXISTS
+        if not mw.col:
+            showCritical("No active collection found to restore over.")
+            return
+        current_col_path = mw.col.path 
+
+        def on_progress(p): 
+            mw.taskman.run_on_main(lambda: mw.progress.update(label=f"Downloading: {p}%", value=p))
+
+        # This runs AFTER the profile is fully dead and file locks are released
+        def start_download_after_unload():
+            def do_dl():
+                from .sync import download_collection
+                # Pass the captured path into the download utility
+                return download_collection(current_col_path, on_progress)
+
+            def on_done(fut):
+                mw.progress.finish()
+                try:
+                    fut.result()
+                    
+                    # Reload profile fresh
+                    mw.loadProfile()
+                    
+                    # Catch the new cloud metadata sync ID and match it locally
+                    try:
+                        from .sync import get_drive_service, get_or_create_folder, get_file_id, META_FILE
+                        import json
+                        service = get_drive_service()
+                        fid = get_or_create_folder(service)
+                        meta_id = get_file_id(service, fid, META_FILE)
+                        if meta_id:
+                            res = service.files().get_media(fileId=meta_id).execute()
+                            if res:
+                                remote_meta = json.loads(res)
+                                config = mw.addonManager.getConfig(__name__) or {}
+                                config["last_sync_id"] = remote_meta.get("last_sync_id")
+                                mw.addonManager.writeConfig(__name__, config)
+                    except Exception:
+                        pass
+                    
+                    showInfo("Restore complete! Your collection has been updated successfully.")
+                    
+                except Exception as e: 
+                    showCritical(f"Failed to restore: {e}")
+                    # Safety net: bring the profile back online if the download errors out
+                    mw.loadProfile()
+
+            mw.progress.start(label="Downloading from Drive...", immediate=True)
+            mw.taskman.run_in_background(do_dl, on_done)
+
+        # 1. Close the settings dialog FIRST so its UI loops don't conflict with unloadProfile
+        self.accept()
+
+        # 2. Trigger the asynchronous profile unload
+        mw.unloadProfile(onsuccess=start_download_after_unload)
 
 def show_settings():
     SettingsDialog(mw).exec()

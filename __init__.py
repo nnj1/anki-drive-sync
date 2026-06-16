@@ -7,6 +7,14 @@ from .settings_dialog import show_settings
 from .log_window import SyncLogWindow
 
 def run_full_sync():
+    # CRITICAL FIX: Explicitly compel the Rust backend to commit 
+    # and truncate the WAL journal directly into the physical .anki2 file.
+    if mw.col and mw.col.db:
+        try:
+            mw.col.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception as e:
+            print(f"WAL Checkpoint failed: {e}")
+
     log_win = SyncLogWindow(mw)
     log_win.show()
 
@@ -21,11 +29,13 @@ def run_full_sync():
         # Conflict Check
         if meta_id:
             res = service.files().get_media(fileId=meta_id).execute()
-            remote_meta = json.loads(res)
-            local_sync_id = mw.addonManager.getConfig(__name__).get("last_sync_id")
-            if local_sync_id and remote_meta["last_sync_id"] != local_sync_id:
-                if not askUser("Cloud version is newer/different. Overwrite Cloud?"):
-                    return "cancelled"
+            if res:
+                remote_meta = json.loads(res)
+                config = mw.addonManager.getConfig(__name__) or {}
+                local_sync_id = config.get("last_sync_id")
+                if local_sync_id and remote_meta["last_sync_id"] != local_sync_id:
+                    if not askUser("Cloud version is newer/different. Overwrite Cloud?"):
+                        return "cancelled"
 
         log_msg("Starting Database Sync...")
         new_id = upload_collection()
@@ -41,10 +51,10 @@ def run_full_sync():
             if res != "cancelled":
                 # Get existing config or start with empty dict
                 config = mw.addonManager.getConfig(__name__) or {}
-                
+
                 config["last_sync_id"] = res
                 mw.addonManager.writeConfig(__name__, config)
-                
+
                 log_msg("--- Sync Successfully Finished ---")
                 showInfo("Sync Complete!")
         except Exception as e:

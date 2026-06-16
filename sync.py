@@ -36,12 +36,12 @@ def get_hash(path):
 
 # --- Collection Logic ---
 
-def download_collection(on_progress=None):
+def download_collection(file_path, on_progress=None):
     service = get_drive_service()
     folder_id = get_or_create_folder(service)
-    file_path = mw.col.path
-    file_id = get_file_id(service, folder_id, os.path.basename(file_path))
-    
+    file_name = os.path.basename(file_path)
+    file_id = get_file_id(service, folder_id, file_name)
+
     if not file_id: 
         raise FileNotFoundError("No cloud backup found.")
 
@@ -64,14 +64,24 @@ def download_collection(on_progress=None):
         backup_path = file_path + ".bak"
         if os.path.exists(file_path):
             os.replace(file_path, backup_path)
-            
+
         # Move the downloaded temp file to the live location
         os.replace(temp_path, file_path)
-        
+
+        # 3. CRITICAL STEP: Wipe out stray database logs so they do not conflict
+        # with the newly downloaded collection file state.
+        for suffix in ["-wal", "-shm", "-journal"]:
+            stray_file = file_path + suffix
+            if os.path.exists(stray_file):
+                try:
+                    os.remove(stray_file)
+                except Exception:
+                    pass # Non-critical if it is already locked or missing
+
         # Optionally remove the backup after success
         if os.path.exists(backup_path):
             os.remove(backup_path)
-            
+
     except Exception as e:
         # If the swap fails, try to restore the backup
         if os.path.exists(backup_path):
